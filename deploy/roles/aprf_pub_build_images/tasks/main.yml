@@ -1,0 +1,250 @@
+---
+# Reader note:
+# This role builds the four Java application images used by the APRF article:
+# catalog-jvm, experience-jvm, catalog-native, and experience-native.
+#
+# The JVM images are ordinary bytecode-based Quarkus images and can be built
+# through the local container engine mounted into the APRF tool container. The
+# native images are intentionally built on the bastion host, where CPU, memory,
+# disk, architecture, and private-cluster access are predictable for the demo.
+#
+# The guardrails below are close to the expensive operation. If bastion RAM or
+# /var free space is too small, the native build fails before starting a costly
+# or unstable native-image compilation.
+- name: Build the JVM sample images through the mounted host Podman engine
+  ansible.builtin.command:
+    argv:
+      - podman
+      - --url
+      - "{{ aprf_pub_podman_socket }}"
+      - build
+      - --platform
+      - "{{ aprf_pub_effective_jvm_image_platform }}"
+      - --build-arg
+      - "APP_DIR={{ aprf_pub_jvm_app.build_args.APP_DIR }}"
+      - --tag
+      - "{{ aprf_pub_jvm_app.image_ref }}"
+      - --file
+      - "{{ aprf_pub_jvm_app.dockerfile }}"
+      - "{{ aprf_pub_jvm_app.context_dir }}"
+  loop: "{{ aprf_pub_jvm_apps }}"
+  loop_control:
+    loop_var: aprf_pub_jvm_app
+    label: "{{ aprf_pub_jvm_app.app_name }}"
+  changed_when: true
+  when: not (aprf_pub_skip_jvm_build | bool)
+
+- name: Push the JVM sample images through the mounted host Podman engine
+  ansible.builtin.command:
+    argv:
+      - podman
+      - --url
+      - "{{ aprf_pub_podman_socket }}"
+      - push
+      - --format
+      - v2s2
+      - --compression-format
+      - gzip
+      - --remove-signatures
+      - --retry
+      - "3"
+      - --retry-delay
+      - 5s
+      - "{{ aprf_pub_jvm_app.image_ref }}"
+      - "docker://{{ aprf_pub_jvm_app.image_ref }}"
+  loop: "{{ aprf_pub_jvm_apps }}"
+  loop_control:
+    loop_var: aprf_pub_jvm_app
+    label: "{{ aprf_pub_jvm_app.app_name }}"
+  changed_when: true
+  when: not (aprf_pub_skip_jvm_build | bool)
+
+- name: Prove the mounted bastion SSH key exists inside the APRF tool container
+  ansible.builtin.stat:
+    path: "{{ aprf_pub_effective_bastion_key }}"
+  register: aprf_pub_effective_bastion_key_stat
+  when: not (aprf_pub_skip_native_build | bool)
+
+- name: Fail if the mounted bastion SSH key is missing inside the APRF tool container
+  ansible.builtin.assert:
+    that:
+      - aprf_pub_effective_bastion_key_stat.stat.exists
+    fail_msg: >-
+      Native image builds are bastion-only. The APRF tool container could not
+      see the mounted bastion key at {{ aprf_pub_effective_bastion_key }}.
+  when: not (aprf_pub_skip_native_build | bool)
+
+- name: Build and push the native sample images on the bastion only
+  when: not (aprf_pub_skip_native_build | bool)
+  block:
+    - name: Normalize the bastion native-build workspace before proving capacity
+      # Reader note:
+      # Native compilation is the most resource-heavy part of the companion
+      # deployment. The workspace reset keeps reruns deterministic, and the RAM
+      # plus /var checks prevent accidental slow or expensive failed builds.
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ssh -i {{ aprf_pub_effective_bastion_key | quote }} \
+          -o StrictHostKeyChecking=no \
+          {{ aprf_pub_effective_bastion_host | quote }} \
+          "bash -lc '
+            set -euo pipefail
+            mkdir -p \"{{ aprf_pub_native_build_root }}\"
+            command -v podman >/dev/null 2>&1
+            podman \
+              --root \"{{ aprf_pub_native_build_root }}/storage-root\" \
+              --runroot \"{{ aprf_pub_native_build_root }}/storage-runroot\" \
+              system reset -f >/dev/null 2>&1 || true
+            podman unshare rm -rf \
+              \"{{ aprf_pub_native_build_root }}/storage-root\" \
+              \"{{ aprf_pub_native_build_root }}/storage-runroot\"
+            rm -rf \
+              \"{{ aprf_pub_native_build_context_root }}\" \
+              \"{{ aprf_pub_native_build_root }}/tmp\" \
+              \"{{ aprf_pub_native_build_auth_file }}\"
+            set -- \$(grep MemTotal /proc/meminfo)
+            mem_total_kb=\$2
+            mem_total_mb=\$((mem_total_kb / 1024))
+            set -- \$(df -Pm /var | tail -n 1)
+            var_free_mb=\$4
+            if [ \"\${mem_total_mb}\" -lt {{ aprf_pub_native_build_required_mem_mb }} ]; then
+              echo \"Bastion RAM too small: \${mem_total_mb} MB total, need at least {{ aprf_pub_native_build_required_mem_mb }} MB.\" >&2
+              exit 1
+            fi
+            if [ \"\${var_free_mb}\" -lt {{ aprf_pub_native_build_required_free_mb }} ]; then
+              echo \"Bastion /var free space too small: \${var_free_mb} MB free, need at least {{ aprf_pub_native_build_required_free_mb }} MB.\" >&2
+              exit 1
+            fi
+            mkdir -p \
+              \"{{ aprf_pub_native_build_context_root }}\" \
+              \"{{ aprf_pub_native_build_root }}/tmp\" \
+              \"{{ aprf_pub_native_build_root }}/storage-root\" \
+              \"{{ aprf_pub_native_build_root }}/storage-runroot\"
+          '"
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Stage the local registry auth file onto the bastion native-build workspace
+      # Reader note:
+      # The registry credential is staged only for the push window and removed
+      # in the always block below. It should never be committed to Git.
+      ansible.builtin.shell: |
+        set -euo pipefail
+        cat {{ aprf_pub_native_registry_auth_file_local | quote }} | \
+        ssh -i {{ aprf_pub_effective_bastion_key | quote }} \
+          -o StrictHostKeyChecking=no \
+          {{ aprf_pub_effective_bastion_host | quote }} \
+          "umask 077 && cat > \"{{ aprf_pub_native_build_auth_file }}\""
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Stage the native build context onto the bastion workspace
+      # Reader note:
+      # Only application source is staged. Build outputs and the Maven wrapper
+      # jar are excluded so the bastion build starts from source, not from a
+      # developer workstation's previous build directory.
+      ansible.builtin.shell: |
+        set -euo pipefail
+        tar \
+          --exclude='./*/target' \
+          --exclude='./.mvn/wrapper/maven-wrapper.jar' \
+          -C {{ aprf_pub_root | quote }} \
+          -cf - \
+          apps | \
+        ssh -i {{ aprf_pub_effective_bastion_key | quote }} \
+          -o StrictHostKeyChecking=no \
+          {{ aprf_pub_effective_bastion_host | quote }} \
+          "bash -lc '
+            set -euo pipefail
+            rm -rf \"{{ aprf_pub_native_build_context_root }}\"
+            mkdir -p \"{{ aprf_pub_native_build_context_root }}\"
+            tar -C \"{{ aprf_pub_native_build_context_root }}\" -xf -
+          '"
+      args:
+        executable: /bin/bash
+      changed_when: true
+
+    - name: Build the native sample images on the bastion
+      # Reader note:
+      # These are Quarkus native-image builds. They take longer than JVM image
+      # builds, but produce the native runtime used later in the article's
+      # memory-footprint, chaos, and D8 corrective-action evidence.
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ssh -i {{ aprf_pub_effective_bastion_key | quote }} \
+          -o StrictHostKeyChecking=no \
+          {{ aprf_pub_effective_bastion_host | quote }} \
+          "bash -lc '
+            set -euo pipefail
+            REGISTRY_AUTH_FILE=\"{{ aprf_pub_native_build_auth_file }}\" \
+            TMPDIR=\"{{ aprf_pub_native_build_root }}/tmp\" \
+            podman build \
+              --root \"{{ aprf_pub_native_build_root }}/storage-root\" \
+              --runroot \"{{ aprf_pub_native_build_root }}/storage-runroot\" \
+              --memory {{ aprf_pub_native_build_container_memory_mb }}m \
+              --build-arg APP_DIR=\"{{ aprf_pub_native_app.build_args.APP_DIR }}\" \
+              --build-arg NATIVE_IMAGE_XMX=\"{{ aprf_pub_native_app.build_args.NATIVE_IMAGE_XMX }}\" \
+              --build-arg NATIVE_IMAGE_PARALLELISM=\"{{ aprf_pub_native_app.build_args.NATIVE_IMAGE_PARALLELISM | string }}\" \
+              --tag \"{{ aprf_pub_native_app.image_ref }}\" \
+              --file \"{{ aprf_pub_native_build_context_root }}/apps/Dockerfile.native\" \
+              \"{{ aprf_pub_native_build_context_root }}/apps\"
+          '"
+      args:
+        executable: /bin/bash
+      loop: "{{ aprf_pub_native_apps }}"
+      loop_control:
+        loop_var: aprf_pub_native_app
+        label: "{{ aprf_pub_native_app.app_name }}"
+      changed_when: true
+
+    - name: Push the native sample images from the bastion
+      # Reader note:
+      # The push happens from the same bastion build context so the large native
+      # image layers do not need to move back through the local workstation.
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ssh -i {{ aprf_pub_effective_bastion_key | quote }} \
+          -o StrictHostKeyChecking=no \
+          {{ aprf_pub_effective_bastion_host | quote }} \
+          "bash -lc '
+            set -euo pipefail
+            REGISTRY_AUTH_FILE=\"{{ aprf_pub_native_build_auth_file }}\" \
+            TMPDIR=\"{{ aprf_pub_native_build_root }}/tmp\" \
+            podman push \
+              --root \"{{ aprf_pub_native_build_root }}/storage-root\" \
+              --runroot \"{{ aprf_pub_native_build_root }}/storage-runroot\" \
+              --format v2s2 \
+              --compression-format gzip \
+              --remove-signatures \
+              --retry 3 \
+              --retry-delay 5s \
+              \"{{ aprf_pub_native_app.image_ref }}\" \
+              \"docker://{{ aprf_pub_native_app.image_ref }}\"
+          '"
+      args:
+        executable: /bin/bash
+      loop: "{{ aprf_pub_native_apps }}"
+      loop_control:
+        loop_var: aprf_pub_native_app
+        label: "{{ aprf_pub_native_app.app_name }}"
+      changed_when: true
+
+  always:
+    - name: Remove the staged registry auth file from the bastion native-build workspace
+      # Reader note:
+      # Cleanup runs even when a build or push fails. Leaving a registry auth
+      # file on the bastion would be unnecessary operational residue.
+      ansible.builtin.shell: |
+        set -euo pipefail
+        ssh -i {{ aprf_pub_effective_bastion_key | quote }} \
+          -o StrictHostKeyChecking=no \
+          {{ aprf_pub_effective_bastion_host | quote }} \
+          "bash -lc '
+            rm -f \"{{ aprf_pub_native_build_auth_file }}\"
+          '"
+      args:
+        executable: /bin/bash
+      changed_when: true
+      failed_when: false

@@ -1,0 +1,421 @@
+---
+# Reader note:
+# This role publishes rendered workload GitOps content to the repository watched
+# by the workload Argo CD instance. Argo does not reconcile this source tree
+# directly. The deploy path renders desired state, syncs only configured paths
+# into a runtime clone, commits the change, and pushes the target branch.
+#
+# Credentials are read from an ignored local secrets file or equivalent private
+# source. PAT handling is hidden with no_log, and the temporary askpass helper
+# is runtime-only.
+- name: Capture bounded public Git publish inputs
+  ansible.builtin.set_fact:
+    aprf_pub_git_publish_workdir: "{{ aprf_pub_gitops_workdir }}"
+    aprf_pub_git_publish_sync_paths: "{{ aprf_pub_gitops_sync_paths | default([], true) }}"
+    aprf_pub_git_publish_commit_message_effective: >-
+      {{
+        aprf_pub_git_publish_commit_message
+        | default('APRF public deploy: refresh GitOps content', true)
+      }}
+    aprf_pub_git_publish_secrets_file: "{{ lookup('env', 'APRF_PUB_GITOPS_SECRETS_FILE') | default('', true) | trim }}"
+    aprf_pub_git_publish_username: "x-access-token"
+
+- name: Check whether the configured Git publish secrets file exists
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -lc
+      - test -f "$1"
+      - _
+      - "{{ aprf_pub_git_publish_secrets_file }}"
+  register: aprf_pub_git_publish_secrets_file_check
+  changed_when: false
+  failed_when: false
+  when: (aprf_pub_git_publish_secrets_file | length) > 0
+
+- name: Fail if the configured Git publish secrets file is missing
+  ansible.builtin.assert:
+    that:
+      - (aprf_pub_git_publish_secrets_file_check.rc | default(1)) == 0
+    fail_msg: >-
+      The public Git publish path expected a readable GitOps secrets file at
+      {{ aprf_pub_git_publish_secrets_file }}.
+  when: (aprf_pub_git_publish_secrets_file | length) > 0
+
+- name: Read the Git publish username from the secrets file
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -lc
+      - |
+        set -a
+        source "$1"
+        printf '%s' "${APRF_PUB_GITOPS_USERNAME:-x-access-token}"
+      - _
+      - "{{ aprf_pub_git_publish_secrets_file }}"
+  register: aprf_pub_git_publish_username_read
+  changed_when: false
+  when: (aprf_pub_git_publish_secrets_file | length) > 0
+  no_log: true
+
+- name: Read the Git publish PAT from the secrets file
+  ansible.builtin.command:
+    argv:
+      - bash
+      - -lc
+      - |
+        set -a
+        source "$1"
+        printf '%s' "${APRF_PUB_GITOPS_PAT:-}"
+      - _
+      - "{{ aprf_pub_git_publish_secrets_file }}"
+  register: aprf_pub_git_publish_pat_read
+  changed_when: false
+  when: (aprf_pub_git_publish_secrets_file | length) > 0
+  no_log: true
+
+- name: Publish effective Git publish credentials
+  ansible.builtin.set_fact:
+    aprf_pub_git_publish_pat: "{{ aprf_pub_git_publish_pat_read.stdout | default('', true) | trim }}"
+    aprf_pub_git_publish_username: >-
+      {{
+        aprf_pub_git_publish_username_read.stdout
+        | default('x-access-token', true)
+        | trim
+      }}
+
+- name: Derive the effective Git publish remote URL
+  ansible.builtin.set_fact:
+    aprf_pub_git_publish_remote_url: >-
+      {%- set raw = aprf_pub_effective_gitops_repo_url | default('', true) | trim -%}
+      {%- if (aprf_pub_git_publish_pat | length) > 0 and raw.startswith('git@github.com:') -%}
+      https://github.com/{{ raw | regex_replace('^git@github.com:', '') }}
+      {%- elif (aprf_pub_git_publish_pat | length) > 0 and raw.startswith('ssh://git@github.com/') -%}
+      https://github.com/{{ raw | regex_replace('^ssh://git@github.com/', '') }}
+      {%- else -%}
+      {{ raw }}
+      {%- endif -%}
+    aprf_pub_git_publish_has_pat: "{{ (aprf_pub_git_publish_pat | length) > 0 }}"
+
+- name: Assert HTTPS Git publication has a usable PAT
+  # Reader note:
+  # HTTPS remotes need an explicit token because the deploy lane runs
+  # non-interactively inside the tool container.
+  ansible.builtin.assert:
+    that:
+      - not (aprf_pub_git_publish_remote_url is match('^https://')) or (aprf_pub_git_publish_has_pat | bool)
+    fail_msg: >-
+      HTTPS Git publication needs a readable PAT in the configured public
+      GitOps secrets source.
+
+- name: Assert bounded Git publish inputs
+  ansible.builtin.assert:
+    that:
+      - aprf_pub_git_publish_workdir | trim | length > 0
+      - aprf_pub_git_publish_sync_paths | length > 0
+      - aprf_pub_git_publish_commit_message_effective | trim | length > 0
+      - aprf_pub_git_publish_remote_url | trim | length > 0
+      - aprf_pub_effective_gitops_target_revision | trim | length > 0
+    fail_msg: >-
+      The public Git publish role requires a runtime GitOps workdir, at least
+      one bounded sync path, a commit message, and a usable remote branch.
+
+- name: Ensure the runtime GitOps workdir parent exists
+  ansible.builtin.file:
+    path: "{{ aprf_pub_git_publish_workdir | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Check whether the runtime GitOps workdir already contains a clone
+  ansible.builtin.stat:
+    path: "{{ aprf_pub_git_publish_workdir }}/.git"
+  register: aprf_pub_git_publish_gitdir
+
+- name: Read the existing runtime GitOps origin URL
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ aprf_pub_git_publish_workdir }}"
+      - remote
+      - get-url
+      - origin
+  register: aprf_pub_git_publish_existing_origin
+  changed_when: false
+  when: aprf_pub_git_publish_gitdir.stat.exists
+  no_log: "{{ aprf_pub_git_publish_has_pat | bool }}"
+
+- name: Reset the runtime GitOps workdir when it points at the wrong repo
+  # Reader note:
+  # The runtime clone is disposable state. Resetting it is safer than pushing
+  # rendered article workloads into the wrong GitOps repository.
+  ansible.builtin.file:
+    path: "{{ aprf_pub_git_publish_workdir }}"
+    state: absent
+  when:
+    - aprf_pub_git_publish_gitdir.stat.exists
+    - (aprf_pub_git_publish_existing_origin.stdout | default('', true) | trim) != (aprf_pub_git_publish_remote_url | trim)
+
+- name: Recreate the runtime GitOps workdir parent after reset
+  ansible.builtin.file:
+    path: "{{ aprf_pub_git_publish_workdir | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Re-read whether the runtime GitOps workdir now contains a clone
+  ansible.builtin.stat:
+    path: "{{ aprf_pub_git_publish_workdir }}/.git"
+  register: aprf_pub_git_publish_gitdir_after_reset
+
+- name: Create a temporary askpass helper for HTTPS Git auth
+  # Reader note:
+  # Git invokes askpass for username/password prompts. The helper is temporary
+  # and receives credentials through environment variables, not a tracked file.
+  ansible.builtin.copy:
+    dest: /tmp/aprf-pub-git-askpass.sh
+    mode: "0700"
+    content: |
+      #!/usr/bin/env bash
+      case "$1" in
+        *Username*) printf '%s\n' "${APRF_PUB_GITOPS_USERNAME}" ;;
+        *Password*) printf '%s\n' "${APRF_PUB_GITOPS_PAT}" ;;
+        *) printf '\n' ;;
+      esac
+  when: aprf_pub_git_publish_has_pat | bool
+  no_log: true
+
+- name: Clone the runtime GitOps repository when missing
+  ansible.builtin.command:
+    argv:
+      - git
+      - clone
+      - "{{ aprf_pub_git_publish_remote_url }}"
+      - "{{ aprf_pub_git_publish_workdir }}"
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
+    GIT_ASKPASS: "{{ '/tmp/aprf-pub-git-askpass.sh' if (aprf_pub_git_publish_has_pat | bool) else omit }}"
+    APRF_PUB_GITOPS_PAT: "{{ aprf_pub_git_publish_pat if (aprf_pub_git_publish_has_pat | bool) else omit }}"
+    APRF_PUB_GITOPS_USERNAME: "{{ aprf_pub_git_publish_username if (aprf_pub_git_publish_has_pat | bool) else omit }}"
+  when: not (aprf_pub_git_publish_gitdir_after_reset.stat.exists | default(false))
+  no_log: "{{ aprf_pub_git_publish_has_pat | bool }}"
+
+- name: Check whether the target GitOps branch already exists on origin
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ aprf_pub_git_publish_workdir }}"
+      - ls-remote
+      - --exit-code
+      - --heads
+      - origin
+      - "{{ aprf_pub_effective_gitops_target_revision }}"
+  register: aprf_pub_git_publish_remote_branch
+  changed_when: false
+  failed_when: false
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
+    GIT_ASKPASS: "{{ '/tmp/aprf-pub-git-askpass.sh' if (aprf_pub_git_publish_has_pat | bool) else omit }}"
+    APRF_PUB_GITOPS_PAT: "{{ aprf_pub_git_publish_pat if (aprf_pub_git_publish_has_pat | bool) else omit }}"
+    APRF_PUB_GITOPS_USERNAME: "{{ aprf_pub_git_publish_username if (aprf_pub_git_publish_has_pat | bool) else omit }}"
+  no_log: "{{ aprf_pub_git_publish_has_pat | bool }}"
+
+- name: Fetch the target GitOps branch when it already exists
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ aprf_pub_git_publish_workdir }}"
+      - fetch
+      - origin
+      - "{{ aprf_pub_effective_gitops_target_revision }}"
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
+    GIT_ASKPASS: "{{ '/tmp/aprf-pub-git-askpass.sh' if (aprf_pub_git_publish_has_pat | bool) else omit }}"
+    APRF_PUB_GITOPS_PAT: "{{ aprf_pub_git_publish_pat if (aprf_pub_git_publish_has_pat | bool) else omit }}"
+    APRF_PUB_GITOPS_USERNAME: "{{ aprf_pub_git_publish_username if (aprf_pub_git_publish_has_pat | bool) else omit }}"
+  when: aprf_pub_git_publish_remote_branch.rc == 0
+  no_log: "{{ aprf_pub_git_publish_has_pat | bool }}"
+
+- name: Check out the existing target GitOps branch
+  # Reader note:
+  # A normal redeploy updates the existing target branch. The branch is the
+  # contract Argo watches, so the role always publishes to that explicit
+  # revision rather than relying on whatever branch the clone last used.
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ aprf_pub_git_publish_workdir }}"
+      - checkout
+      - -B
+      - "{{ aprf_pub_effective_gitops_target_revision }}"
+      - "origin/{{ aprf_pub_effective_gitops_target_revision }}"
+  when: aprf_pub_git_publish_remote_branch.rc == 0
+
+- name: Check out a fresh orphan target GitOps branch when missing remotely
+  # Reader note:
+  # First-time publication can start from an empty orphan branch. That keeps the
+  # runtime GitOps repository focused on rendered cluster state instead of
+  # inheriting unrelated repository files.
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ aprf_pub_git_publish_workdir }}"
+      - checkout
+      - --orphan
+      - "{{ aprf_pub_effective_gitops_target_revision }}"
+  when: aprf_pub_git_publish_remote_branch.rc != 0
+
+- name: Remove the default working-tree content on a fresh orphan branch
+  # Reader note:
+  # An orphan branch can still expose files from the previous checkout until the
+  # working tree is cleaned. Removing them here makes the first publication as
+  # bounded as later updates.
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ aprf_pub_git_publish_workdir }}"
+      - rm
+      - -rf
+      - --ignore-unmatch
+      - .
+  when: aprf_pub_git_publish_remote_branch.rc != 0
+  changed_when: false
+
+- name: Configure a local Git identity for runtime publication
+  # Reader note:
+  # The commit identity is intentionally local and descriptive. It marks that
+  # the commit came from the APRF publication automation, not from a human
+  # author editing the runtime GitOps repository by hand.
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ aprf_pub_git_publish_workdir }}"
+      - config
+      - "{{ item.key }}"
+      - "{{ item.value }}"
+  loop:
+    - key: user.name
+      value: APRF Pub
+    - key: user.email
+      value: aprf-pub@local
+  changed_when: false
+
+- name: Ensure parent directories exist for the bounded sync roots
+  # Reader note:
+  # The public deploy path publishes only the configured rendered roots. Parent
+  # directories are created explicitly so nested roots can be refreshed without
+  # copying the full source repository.
+  ansible.builtin.file:
+    path: "{{ aprf_pub_git_publish_workdir }}/{{ item | dirname }}"
+    state: directory
+    mode: "0755"
+  loop: "{{ aprf_pub_git_publish_sync_paths }}"
+
+- name: Remove stale bounded sync roots from the runtime GitOps checkout
+  # Reader note:
+  # Each configured root is replaced wholesale. This prevents deleted manifests
+  # from lingering in the GitOps branch after a profile or generated output
+  # changes.
+  ansible.builtin.file:
+    path: "{{ aprf_pub_git_publish_workdir }}/{{ item }}"
+    state: absent
+  loop: "{{ aprf_pub_git_publish_sync_paths }}"
+
+- name: Copy bounded public GitOps content into the runtime checkout
+  # Reader note:
+  # Only the configured paths are copied into the runtime GitOps branch. The
+  # source tree may contain tests, evidence, docs, and local runtime state, but
+  # Argo needs only the rendered desired-state paths selected by
+  # public-values.yaml.
+  ansible.builtin.command:
+    argv:
+      - cp
+      - -a
+      - "{{ aprf_pub_root }}/{{ item }}"
+      - "{{ aprf_pub_git_publish_workdir }}/{{ item | dirname }}/"
+  loop: "{{ aprf_pub_git_publish_sync_paths }}"
+  changed_when: true
+
+- name: Stage the bounded public GitOps content
+  # Reader note:
+  # Git is staged by the same bounded path list used for copy. This keeps the
+  # publication diff easy to review and avoids accidental commits of local
+  # helper state.
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ aprf_pub_git_publish_workdir }}"
+      - add
+      - -A
+      - "{{ item }}"
+  loop: "{{ aprf_pub_git_publish_sync_paths }}"
+  changed_when: true
+
+- name: Detect whether the bounded GitOps sync changed anything
+  # Reader note:
+  # A no-op deploy is valid. If rendered desired state already matches the
+  # runtime branch, the role skips the commit and push rather than creating
+  # empty history.
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ aprf_pub_git_publish_workdir }}"
+      - diff
+      - --cached
+      - --quiet
+  register: aprf_pub_git_publish_cached_diff
+  changed_when: false
+  failed_when: aprf_pub_git_publish_cached_diff.rc not in [0, 1]
+
+- name: Create the bounded GitOps commit
+  # Reader note:
+  # The commit is the auditable change boundary Argo reconciles from. In the D8
+  # corrective-action story, the same GitOps mechanism is used for the cache
+  # enable and restore changes.
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ aprf_pub_git_publish_workdir }}"
+      - commit
+      - -m
+      - "{{ aprf_pub_git_publish_commit_message_effective }}"
+  when: aprf_pub_git_publish_cached_diff.rc == 1
+
+- name: Push the bounded GitOps commit to the target branch
+  # Reader note:
+  # Pushing the branch is the hand-off from deploy automation to Argo CD. Argo
+  # observes the new commit, reconciles the rendered manifests, and reports sync
+  # and health back in the console.
+  ansible.builtin.command:
+    argv:
+      - git
+      - -C
+      - "{{ aprf_pub_git_publish_workdir }}"
+      - push
+      - origin
+      - "HEAD:{{ aprf_pub_effective_gitops_target_revision }}"
+  environment:
+    GIT_TERMINAL_PROMPT: "0"
+    GIT_ASKPASS: "{{ '/tmp/aprf-pub-git-askpass.sh' if (aprf_pub_git_publish_has_pat | bool) else omit }}"
+    APRF_PUB_GITOPS_PAT: "{{ aprf_pub_git_publish_pat if (aprf_pub_git_publish_has_pat | bool) else omit }}"
+    APRF_PUB_GITOPS_USERNAME: "{{ aprf_pub_git_publish_username if (aprf_pub_git_publish_has_pat | bool) else omit }}"
+  when: aprf_pub_git_publish_cached_diff.rc == 1
+  no_log: "{{ aprf_pub_git_publish_has_pat | bool }}"
+
+- name: Remove the temporary askpass helper
+  # Reader note:
+  # Credentials are only needed for Git transport. The helper is removed at the
+  # end of the role so the runtime container does not keep an unnecessary secret
+  # handling script.
+  ansible.builtin.file:
+    path: /tmp/aprf-pub-git-askpass.sh
+    state: absent
+  when: aprf_pub_git_publish_has_pat | bool

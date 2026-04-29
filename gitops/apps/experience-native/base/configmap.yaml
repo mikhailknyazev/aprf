@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "64100"
+  name: experience-native-config
+data:
+  CATALOG_MP_REST_URL: "http://catalog-native.catalog-native.svc.cluster.local:8080"

@@ -1,0 +1,261 @@
+---
+# Reader note:
+# This role is the executable version of the D8 Governance and observability
+# story in the article. It does not patch a live pod by hand. It commits a
+# small GitOps change, asks Argo CD to sync only the affected catalog-native
+# resources, and then commits the restore change back to the authored baseline.
+#
+# The corrective action is intentionally narrow: enable catalog-native cache
+# during the bounded incident window, roll the catalog-native Deployment so the
+# ConfigMap value is consumed, then restore cache disabled. This keeps the demo
+# honest: faster product-view latency is useful during pressure, but product
+# price and stock data should not silently become permanently cached.
+- name: Assert bounded D8 Governance and observability corrective values
+  ansible.builtin.assert:
+    that:
+      - not (aprf_pub_d8_baseline_catalog_cache_enabled | default(false, true) | bool)
+      - (aprf_pub_d8_corrective_catalog_cache_enabled | default(true, true) | bool)
+    fail_msg: >-
+      The D8 Governance and observability corrective action only supports a
+      bounded native catalog cache enable and baseline restore.
+
+- name: Derive the D8 Governance and observability commit messages
+  ansible.builtin.set_fact:
+    aprf_pub_d8_corrective_commit_message: "APRF D8 Governance and observability corrective action: enable catalog-native cache"
+    aprf_pub_d8_restore_commit_message: "APRF D8 Governance and observability corrective action: restore catalog-native cache baseline"
+
+- name: Derive the corrective D8 Governance and observability rollout identifier
+  ansible.builtin.set_fact:
+    aprf_pub_d8_rollout_id: "pub-d8-{{ lookup('pipe', 'date -u +%Y%m%dT%H%M%SZ') }}"
+    aprf_pub_runtime_configmap_data: "{{ aprf_pub_corrective_runtime_configmap_data }}"
+    aprf_pub_runtime_rollout_id: "{{ aprf_pub_d8_rollout_id }}"
+
+- name: Render the corrective D8 Governance and observability config patch
+  ansible.builtin.template:
+    src: "{{ aprf_pub_deploy_templates_root }}/aprf-runtime-values.yaml.j2"
+    dest: "{{ aprf_pub_runtime_values_path }}"
+    mode: "0644"
+
+- name: Render the corrective D8 Governance and observability rollout patch
+  ansible.builtin.template:
+    src: "{{ aprf_pub_deploy_templates_root }}/catalog-native-rollout.patch.yaml.j2"
+    dest: "{{ aprf_pub_rollout_patch_path }}"
+    mode: "0644"
+
+- name: Publish the corrective D8 Governance and observability GitOps change
+  # Reader note:
+  # The correction becomes a Git commit first. That is the governance point:
+  # even emergency-like application changes stay reviewable and repeatable.
+  ansible.builtin.include_role:
+    name: aprf_pub_git_publish
+  vars:
+    aprf_pub_git_publish_paths:
+      - "{{ aprf_pub_runtime_values_path }}"
+      - "{{ aprf_pub_rollout_patch_path }}"
+    aprf_pub_git_publish_commit_message: "{{ aprf_pub_d8_corrective_commit_message }}"
+
+- name: Read the workload root Application before targeted D8 Governance and observability sync
+  kubernetes.core.k8s_info:
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ aprf_pub_apps_argo_namespace }}"
+    name: "{{ aprf_pub_effective_root_application_name }}"
+    kubeconfig: "{{ aprf_pub_kubeconfig }}"
+  register: aprf_pub_d8_application_before
+  changed_when: false
+
+- name: Capture whether a top-level Application.operation is already present
+  ansible.builtin.set_fact:
+    aprf_pub_d8_operation_present: >-
+      {{
+        (((aprf_pub_d8_application_before.resources | first | default({})) | json_query('operation')) is not none)
+      }}
+
+- name: Request a hard refresh before the targeted D8 Governance and observability sync
+  # Reader note:
+  # The hard refresh asks Argo CD to re-read Git before the targeted sync. This
+  # reduces the chance of measuring stale desired state during the live proof.
+  kubernetes.core.k8s:
+    state: patched
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ aprf_pub_apps_argo_namespace }}"
+    name: "{{ aprf_pub_effective_root_application_name }}"
+    kubeconfig: "{{ aprf_pub_kubeconfig }}"
+    definition:
+      metadata:
+        annotations:
+          argocd.argoproj.io/refresh: hard
+
+- name: Replace an existing top-level Application.operation for the targeted D8 Governance and observability sync
+  # Reader note:
+  # Only the ConfigMap and Deployment needed for the corrective action are
+  # synced. The proof is about bounded operational action, not a broad
+  # application-wide reconcile.
+  kubernetes.core.k8s_json_patch:
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ aprf_pub_apps_argo_namespace }}"
+    name: "{{ aprf_pub_effective_root_application_name }}"
+    kubeconfig: "{{ aprf_pub_kubeconfig }}"
+    patch:
+      - op: replace
+        path: /operation
+        value:
+          initiatedBy:
+            username: aprf-pub
+          sync:
+            prune: true
+            resources: "{{ aprf_pub_d8_sync_resources }}"
+          retry:
+            limit: 0
+  when: aprf_pub_d8_operation_present | bool
+
+- name: Add a fresh top-level Application.operation for the targeted D8 Governance and observability sync
+  # Reader note:
+  # This is the same targeted sync as above, used when no existing Argo
+  # operation is already present.
+  kubernetes.core.k8s_json_patch:
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ aprf_pub_apps_argo_namespace }}"
+    name: "{{ aprf_pub_effective_root_application_name }}"
+    kubeconfig: "{{ aprf_pub_kubeconfig }}"
+    patch:
+      - op: add
+        path: /operation
+        value:
+          initiatedBy:
+            username: aprf-pub
+          sync:
+            prune: true
+            resources: "{{ aprf_pub_d8_sync_resources }}"
+          retry:
+            limit: 0
+  when: not (aprf_pub_d8_operation_present | bool)
+
+- name: Wait for the workload root Application after the corrective D8 Governance and observability sync
+  kubernetes.core.k8s_info:
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ aprf_pub_apps_argo_namespace }}"
+    name: "{{ aprf_pub_effective_root_application_name }}"
+    kubeconfig: "{{ aprf_pub_kubeconfig }}"
+  register: aprf_pub_d8_after_corrective_sync
+  changed_when: false
+  retries: 60
+  delay: 10
+  until:
+    - (aprf_pub_d8_after_corrective_sync.resources | length) == 1
+    - (((aprf_pub_d8_after_corrective_sync.resources | first | default({})) | json_query('status.sync.status')) | default('Unknown')) == 'Synced'
+    - (((aprf_pub_d8_after_corrective_sync.resources | first | default({})) | json_query('status.health.status')) | default('Unknown')) == 'Healthy'
+    - ((((aprf_pub_d8_after_corrective_sync.resources | first | default({})) | json_query('status.operationState.phase')) | default('')) not in ['Running', 'Terminating'])
+
+- name: Set the D8 Governance and observability baseline runtime values for restore
+  ansible.builtin.set_fact:
+    aprf_pub_runtime_configmap_data: "{{ aprf_pub_baseline_runtime_configmap_data }}"
+    aprf_pub_runtime_rollout_id: "pub-baseline"
+
+- name: Restore the D8 Governance and observability baseline config patch
+  ansible.builtin.template:
+    src: "{{ aprf_pub_deploy_templates_root }}/aprf-runtime-values.yaml.j2"
+    dest: "{{ aprf_pub_runtime_values_path }}"
+    mode: "0644"
+
+- name: Restore the D8 Governance and observability baseline rollout patch
+  ansible.builtin.template:
+    src: "{{ aprf_pub_deploy_templates_root }}/catalog-native-rollout.patch.yaml.j2"
+    dest: "{{ aprf_pub_rollout_patch_path }}"
+    mode: "0644"
+
+- name: Publish the baseline D8 Governance and observability restore change
+  # Reader note:
+  # Restore is part of the proof, not cleanup. The cache is returned to the
+  # authored baseline through GitOps so the temporary latency fix does not
+  # become a permanent stale-product-data policy.
+  ansible.builtin.include_role:
+    name: aprf_pub_git_publish
+  vars:
+    aprf_pub_git_publish_paths:
+      - "{{ aprf_pub_runtime_values_path }}"
+      - "{{ aprf_pub_rollout_patch_path }}"
+    aprf_pub_git_publish_commit_message: "{{ aprf_pub_d8_restore_commit_message }}"
+
+- name: Read the workload root Application before targeted D8 Governance and observability restore sync
+  kubernetes.core.k8s_info:
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ aprf_pub_apps_argo_namespace }}"
+    name: "{{ aprf_pub_effective_root_application_name }}"
+    kubeconfig: "{{ aprf_pub_kubeconfig }}"
+  register: aprf_pub_d8_restore_before
+  changed_when: false
+
+- name: Capture whether a top-level Application.operation is already present before restore
+  ansible.builtin.set_fact:
+    aprf_pub_d8_restore_operation_present: >-
+      {{
+        (((aprf_pub_d8_restore_before.resources | first | default({})) | json_query('operation')) is not none)
+      }}
+
+- name: Replace an existing top-level Application.operation for the targeted D8 Governance and observability restore
+  # Reader note:
+  # Restore uses the same bounded resource set as correction. This symmetry is
+  # what makes the operational story auditable.
+  kubernetes.core.k8s_json_patch:
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ aprf_pub_apps_argo_namespace }}"
+    name: "{{ aprf_pub_effective_root_application_name }}"
+    kubeconfig: "{{ aprf_pub_kubeconfig }}"
+    patch:
+      - op: replace
+        path: /operation
+        value:
+          initiatedBy:
+            username: aprf-pub
+          sync:
+            prune: true
+            resources: "{{ aprf_pub_d8_sync_resources }}"
+          retry:
+            limit: 0
+  when: aprf_pub_d8_restore_operation_present | bool
+
+- name: Add a fresh top-level Application.operation for the targeted D8 Governance and observability restore
+  # Reader note:
+  # This is the restore equivalent of the targeted sync add path.
+  kubernetes.core.k8s_json_patch:
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ aprf_pub_apps_argo_namespace }}"
+    name: "{{ aprf_pub_effective_root_application_name }}"
+    kubeconfig: "{{ aprf_pub_kubeconfig }}"
+    patch:
+      - op: add
+        path: /operation
+        value:
+          initiatedBy:
+            username: aprf-pub
+          sync:
+            prune: true
+            resources: "{{ aprf_pub_d8_sync_resources }}"
+          retry:
+            limit: 0
+  when: not (aprf_pub_d8_restore_operation_present | bool)
+
+- name: Wait for the workload root Application after the baseline D8 Governance and observability restore
+  kubernetes.core.k8s_info:
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ aprf_pub_apps_argo_namespace }}"
+    name: "{{ aprf_pub_effective_root_application_name }}"
+    kubeconfig: "{{ aprf_pub_kubeconfig }}"
+  register: aprf_pub_d8_after_restore_sync
+  changed_when: false
+  retries: 60
+  delay: 10
+  until:
+    - (aprf_pub_d8_after_restore_sync.resources | length) == 1
+    - (((aprf_pub_d8_after_restore_sync.resources | first | default({})) | json_query('status.sync.status')) | default('Unknown')) == 'Synced'
+    - (((aprf_pub_d8_after_restore_sync.resources | first | default({})) | json_query('status.health.status')) | default('Unknown')) == 'Healthy'
+    - ((((aprf_pub_d8_after_restore_sync.resources | first | default({})) | json_query('status.operationState.phase')) | default('')) not in ['Running', 'Terminating'])

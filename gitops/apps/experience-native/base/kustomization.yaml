@@ -1,0 +1,15 @@
+# Local copy of the routed native experience workload and its richer
+# D8 Governance and observability alert and corrective-action path.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: experience-native
+resources:
+  - imagestream.yaml
+  - configmap.yaml
+  - networkpolicy.yaml
+  - deployment.yaml
+  - poddisruptionbudget.yaml
+  - service.yaml
+  - route.yaml
+  - servicemonitor.yaml
+  - prometheusrule.yaml

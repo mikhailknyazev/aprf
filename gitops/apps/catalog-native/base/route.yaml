@@ -1,0 +1,12 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "63500"
+  name: catalog-native
+spec:
+  to:
+    kind: Service
+    name: catalog-native
+  port:
+    targetPort: http

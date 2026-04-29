@@ -1,0 +1,12 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "64500"
+  name: experience-native
+spec:
+  to:
+    kind: Service
+    name: experience-native
+  port:
+    targetPort: http

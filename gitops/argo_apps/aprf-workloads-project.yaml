@@ -1,0 +1,45 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: aprf-workloads
+  namespace: openshift-gitops-apps
+spec:
+  sourceRepos:
+    - https://github.com/example/aprf-runtime-gitops.git
+  destinations:
+    - namespace: basic-app
+      server: https://kubernetes.default.svc
+    - namespace: catalog-jvm
+      server: https://kubernetes.default.svc
+    - namespace: experience-jvm
+      server: https://kubernetes.default.svc
+    - namespace: catalog-native
+      server: https://kubernetes.default.svc
+    - namespace: experience-native
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: ConfigMap
+    - group: ""
+      kind: LimitRange
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: Service
+    - group: apps
+      kind: Deployment
+    - group: image.openshift.io
+      kind: ImageStream
+    - group: monitoring.coreos.com
+      kind: PrometheusRule
+    - group: monitoring.coreos.com
+      kind: ServiceMonitor
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: policy
+      kind: PodDisruptionBudget
+    - group: route.openshift.io
+      kind: Route

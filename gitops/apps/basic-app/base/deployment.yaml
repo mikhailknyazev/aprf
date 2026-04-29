@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "60300"
+    image.openshift.io/triggers: >-
+      [{"from":{"kind":"ImageStreamTag","name":"basic-app:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"basic-app\")].image"}]
+  name: basic-app
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: basic-app
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: basic-app
+    spec:
+      containers:
+        - name: basic-app
+          image: basic-app:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - python
+            - -u
+            - /opt/app/app.py
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: APP_MESSAGE
+              value: "Hello from basic-app"
+          ports:
+            - containerPort: 8080
+              name: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          volumeMounts:
+            - mountPath: /opt/app
+              name: app-source
+      volumes:
+        - configMap:
+            name: basic-app-source
+          name: app-source

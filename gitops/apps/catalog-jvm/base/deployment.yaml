@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "63300"
+    image.openshift.io/triggers: >-
+      [{"from":{"kind":"ImageStreamTag","name":"catalog-jvm:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"catalog-jvm\")].image"}]
+  name: catalog-jvm
+spec:
+  replicas: 3
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: catalog-jvm
+  strategy:
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: catalog-jvm
+    spec:
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: catalog-jvm
+          maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: catalog-jvm
+          maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+      containers:
+        - name: catalog-jvm
+          image: catalog-jvm:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          startupProbe:
+            failureThreshold: 24
+            httpGet:
+              path: /q/health/ready
+              port: http
+            periodSeconds: 5
+          readinessProbe:
+            failureThreshold: 6
+            httpGet:
+              path: /q/health/ready
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /q/health/live
+              port: http
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

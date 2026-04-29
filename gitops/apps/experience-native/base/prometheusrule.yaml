@@ -1,0 +1,42 @@
+# Monitoring rules for the native experience service and its main routed
+# product-view path.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "64700"
+  labels:
+    app.kubernetes.io/name: experience-native
+    openshift.io/user-monitoring: "true"
+    openshift.io/prometheus-rule-evaluation-scope: leaf-prometheus
+  name: experience-native
+spec:
+  groups:
+    - name: experience-native.rules
+      rules:
+        - alert: ExperienceNativeScrapeTargetDown
+          expr: max by (namespace) (up{namespace="experience-native"}) < 1
+          for: 5m
+          labels:
+            severity: warning
+            app: experience-native
+          annotations:
+            summary: experience-native metrics target is down
+            description: User-workload Prometheus has not scraped experience-native in namespace experience-native for 5 minutes.
+        # This is the alert that later drives the native corrective-action
+        # chain in D8 Governance and observability.
+        - alert: ExperienceNativeRouteLatencyHigh
+          expr: >-
+            histogram_quantile(
+              0.95,
+              sum by (le) (
+                rate(http_server_requests_seconds_bucket{namespace="experience-native",uri="/product-views/{productId}",method="GET"}[2m])
+              )
+            ) > 0.20
+          for: 2m
+          labels:
+            severity: warning
+            app: experience-native
+          annotations:
+            summary: experience-native routed latency is high
+            description: The p95 latency for experience-native /product-views/{productId} stayed above 200ms for at least 2 minutes.

@@ -1,0 +1,35 @@
+# Local copy of the tiny Python governance workload used most visibly in
+# D1 Capacity, D2 Overcommitment, and D8 Governance and observability.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: basic-app
+resources:
+  # Keep quota and default-limit policy ahead of the Deployment so governance
+  # is already enforced when pods are admitted.
+  # sync-wave 60100
+  - resourcequota.yaml
+  # sync-wave 60100
+  - limitrange.yaml
+  # sync-wave 60000
+  - imagestream.yaml
+  # sync-wave 60200
+  - networkpolicy-default-deny.yaml
+  # sync-wave 60300
+  - deployment.yaml
+  # sync-wave 60400
+  - service.yaml
+  # sync-wave 60500
+  - route.yaml
+  # sync-wave 60600
+  - servicemonitor.yaml
+  # sync-wave 60700
+  - prometheusrule.yaml
+configMapGenerator:
+  # Keep the Python source visible in the manifest bundle instead of hiding it
+  # behind an image-only view.
+  - name: basic-app-source
+    files:
+      - app.py=app.py
+generatorOptions:
+  annotations:
+    argocd.argoproj.io/sync-wave: "60300"

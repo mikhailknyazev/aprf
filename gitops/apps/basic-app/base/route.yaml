@@ -1,0 +1,12 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "60500"
+  name: basic-app
+spec:
+  to:
+    kind: Service
+    name: basic-app
+  port:
+    targetPort: http

@@ -1,0 +1,22 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "60600"
+  labels:
+    app.kubernetes.io/name: basic-app
+    openshift.io/user-monitoring: "true"
+  name: basic-app
+spec:
+  endpoints:
+    - interval: 30s
+      path: /metrics
+      port: http
+      scheme: http
+      scrapeTimeout: 10s
+  namespaceSelector:
+    matchNames:
+      - basic-app
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: basic-app

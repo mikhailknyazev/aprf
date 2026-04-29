@@ -1,0 +1,26 @@
+# Monitoring rules for the native catalog service. Scrape reachability matters
+# directly because the D8 Governance and observability corrective chain depends
+# on native-path visibility.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "63700"
+  labels:
+    app.kubernetes.io/name: catalog-native
+    openshift.io/user-monitoring: "true"
+    openshift.io/prometheus-rule-evaluation-scope: leaf-prometheus
+  name: catalog-native
+spec:
+  groups:
+    - name: catalog-native.rules
+      rules:
+        - alert: CatalogNativeScrapeTargetDown
+          expr: max by (namespace) (up{namespace="catalog-native"}) < 1
+          for: 5m
+          labels:
+            severity: warning
+            app: catalog-native
+          annotations:
+            summary: catalog-native metrics target is down
+            description: User-workload Prometheus has not scraped catalog-native in namespace catalog-native for 5 minutes.

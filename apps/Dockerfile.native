@@ -1,0 +1,68 @@
+ARG APP_DIR
+ARG NATIVE_IMAGE_XMX=4g
+ARG NATIVE_IMAGE_PARALLELISM=4
+
+# Shared native-image contract for the Quarkus native pair.
+# Use APP_DIR to select either catalog-native or experience-native while
+# keeping one reader-visible build path.
+FROM quay.io/quarkus/ubi9-quarkus-mandrel-builder-image:jdk-21 AS build
+ARG APP_DIR
+ARG NATIVE_IMAGE_XMX
+ARG NATIVE_IMAGE_PARALLELISM
+
+USER root
+RUN microdnf install -y tar gzip findutils \
+  && microdnf clean all
+WORKDIR /source/apps
+COPY --chown=quarkus:quarkus . /source/apps
+RUN mkdir -p /code \
+  && cp /source/apps/mvnw /code/mvnw \
+  && cp -r /source/apps/.mvn /code/.mvn \
+  && cp /source/apps/${APP_DIR}/pom.xml /code/pom.xml \
+  && cp -r /source/apps/${APP_DIR}/src /code/src \
+  && chown -R quarkus:quarkus /code
+
+USER quarkus
+WORKDIR /code
+RUN ./mvnw -B -ntp org.apache.maven.plugins:maven-dependency-plugin:3.8.1:go-offline
+RUN ./mvnw -B -ntp -DskipTests package -Dnative \
+  -Dquarkus.native.native-image-xmx="${NATIVE_IMAGE_XMX}" \
+  -Dquarkus.native.additional-build-args="--parallelism=${NATIVE_IMAGE_PARALLELISM}"
+
+# Keep the runtime base on the Quarkus micro image, then import only the
+# minimal curl toolchain needed by the bounded D8 Governance and observability
+# operational probes.
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.6 AS runtime-tools
+RUN microdnf install -y curl-minimal \
+  && microdnf clean all
+
+FROM quay.io/quarkus/ubi9-quarkus-micro-image:2.0
+
+WORKDIR /work/
+COPY --from=build /code/target/*-runner /work/application
+COPY --from=runtime-tools /usr/bin/curl /usr/bin/curl
+COPY --from=runtime-tools \
+  /lib64/libcurl.so.4 \
+  /lib64/libnghttp2.so.14 \
+  /lib64/libssl.so.3 \
+  /lib64/libcrypto.so.3 \
+  /lib64/libgssapi_krb5.so.2 \
+  /lib64/libkrb5.so.3 \
+  /lib64/libk5crypto.so.3 \
+  /lib64/libcom_err.so.2 \
+  /lib64/libkrb5support.so.0 \
+  /lib64/libkeyutils.so.1 \
+  /lib64/libresolv.so.2 \
+  /lib64/libselinux.so.1 \
+  /lib64/libpcre2-8.so.0 \
+  /lib64/
+
+RUN chmod 775 /work /work/application \
+  && chown -R 1001 /work \
+  && chmod -R g+rwX /work \
+  && chown -R 1001:root /work
+
+EXPOSE 8080
+USER 1001
+
+ENTRYPOINT ["./application", "-Dquarkus.http.host=0.0.0.0"]

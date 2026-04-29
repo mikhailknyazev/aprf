@@ -1,0 +1,18 @@
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "63000"
+  name: catalog-native
+spec:
+  lookupPolicy:
+    local: true
+  tags:
+    - name: latest
+      from:
+        kind: DockerImage
+        name: TEST_01/catalog-native:TEST_02
+      importPolicy:
+        scheduled: true
+      referencePolicy:
+        type: Local

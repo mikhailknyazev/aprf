@@ -1,0 +1,25 @@
+# Monitoring rules for the JVM catalog service. The main purpose here is scrape
+# reachability, not a standalone latency alert story.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "63700"
+  labels:
+    app.kubernetes.io/name: catalog-jvm
+    openshift.io/user-monitoring: "true"
+    openshift.io/prometheus-rule-evaluation-scope: leaf-prometheus
+  name: catalog-jvm
+spec:
+  groups:
+    - name: catalog-jvm.rules
+      rules:
+        - alert: CatalogJvmScrapeTargetDown
+          expr: max by (namespace) (up{namespace="catalog-jvm"}) < 1
+          for: 5m
+          labels:
+            severity: warning
+            app: catalog-jvm
+          annotations:
+            summary: catalog-jvm metrics target is down
+            description: User-workload Prometheus has not scraped catalog-jvm in namespace catalog-jvm for 5 minutes.

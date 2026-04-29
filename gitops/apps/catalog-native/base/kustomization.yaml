@@ -1,0 +1,16 @@
+# Local copy of the native catalog workload. Its ConfigMap and alerting
+# objects are central to the D8 Governance and observability corrective-action
+# story.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: catalog-native
+resources:
+  - imagestream.yaml
+  - configmap.yaml
+  - networkpolicy.yaml
+  - deployment.yaml
+  - poddisruptionbudget.yaml
+  - service.yaml
+  - route.yaml
+  - servicemonitor.yaml
+  - prometheusrule.yaml

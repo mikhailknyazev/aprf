@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "63900"
+  labels:
+    argocd.argoproj.io/managed-by: openshift-gitops-apps
+    kubernetes.io/metadata.name: experience-native
+    openshift.io/user-monitoring: "true"
+  name: experience-native

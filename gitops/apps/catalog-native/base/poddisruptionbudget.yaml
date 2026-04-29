@@ -1,0 +1,11 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "63350"
+  name: catalog-native
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: catalog-native

@@ -1,0 +1,159 @@
+---
+# Reader note:
+# This role shows the bounded workload-side Argo CD apply path used by the
+# article companion. The source repo renders a small AppProject and one root
+# Application. Argo CD then reconciles the workload namespaces, Deployments,
+# Services, Routes, ServiceMonitors, PrometheusRules, and runtime profile
+# patches from the GitOps repository.
+#
+# The role deliberately pre-creates the five namespaces before applying the
+# root Application. That makes namespace ownership explicit for the reader and
+# avoids a confusing first-sync race where Argo tries to create namespaced
+# objects before the namespace exists.
+- name: Pre-apply the five workload namespaces before the root Application
+  ansible.builtin.command:
+    argv:
+      - oc
+      - apply
+      - -f
+      - "{{ item }}"
+  loop: "{{ aprf_pub_bootstrap_namespace_manifests }}"
+  changed_when: true
+  environment:
+    KUBECONFIG: "{{ aprf_pub_kubeconfig }}"
+
+- name: Apply the workload AppProject
+  ansible.builtin.command:
+    argv:
+      - oc
+      - apply
+      - -f
+      - "{{ aprf_pub_gitops_rendered_root }}/aprf-workloads-project.yaml"
+  changed_when: true
+  environment:
+    KUBECONFIG: "{{ aprf_pub_kubeconfig }}"
+
+- name: Apply the workload root Application
+  ansible.builtin.command:
+    argv:
+      - oc
+      - apply
+      - -f
+      - "{{ aprf_pub_gitops_rendered_root }}/root-application.yaml"
+  changed_when: true
+  environment:
+    KUBECONFIG: "{{ aprf_pub_kubeconfig }}"
+
+- name: Request a hard refresh on the workload root Application
+  kubernetes.core.k8s:
+    state: patched
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ aprf_pub_apps_argo_namespace }}"
+    name: "{{ aprf_pub_effective_root_application_name }}"
+    kubeconfig: "{{ aprf_pub_kubeconfig }}"
+    definition:
+      metadata:
+        annotations:
+          argocd.argoproj.io/refresh: hard
+
+- name: Wait for the workload root Application sync to finish
+  kubernetes.core.k8s_info:
+    api_version: argoproj.io/v1alpha1
+    kind: Application
+    namespace: "{{ aprf_pub_apps_argo_namespace }}"
+    name: "{{ aprf_pub_effective_root_application_name }}"
+    kubeconfig: "{{ aprf_pub_kubeconfig }}"
+  register: aprf_pub_root_application_wait
+  changed_when: false
+  retries: 60
+  delay: 10
+  until:
+    - (aprf_pub_root_application_wait.resources | length) == 1
+    - (((aprf_pub_root_application_wait.resources | first | default({})) | json_query('status.sync.status')) | default('Unknown')) == 'Synced'
+    - ((((aprf_pub_root_application_wait.resources | first | default({})) | json_query('status.operationState.phase')) | default('')) not in ['Running', 'Terminating'])
+
+- name: Force-import the four Java workload ImageStream tags after push
+  # Reader note:
+  # The application images are pushed outside the cluster. OpenShift ImageStream
+  # imports make those external image tags visible to the Deployment triggers
+  # used by the article workloads. The registry pull secret is scoped only to
+  # the five workload namespaces.
+  block:
+    - name: Create or update the external-registry auth secret in each workload namespace
+      ansible.builtin.shell: |
+        set -euo pipefail
+        oc create secret generic {{ aprf_pub_registry_import_secret_name | quote }} \
+          -n {{ aprf_pub_import_namespace | quote }} \
+          --from-file=.dockerconfigjson={{ aprf_pub_native_registry_auth_file_local | quote }} \
+          --type=kubernetes.io/dockerconfigjson \
+          --dry-run=client \
+          -o yaml | \
+        oc apply -f -
+      args:
+        executable: /bin/bash
+      loop: "{{ aprf_pub_destination_namespaces }}"
+      loop_control:
+        loop_var: aprf_pub_import_namespace
+        label: "{{ aprf_pub_import_namespace }}"
+      changed_when: true
+      environment:
+        KUBECONFIG: "{{ aprf_pub_kubeconfig }}"
+
+    - name: Link the external-registry auth secret to the default service account in each workload namespace
+      ansible.builtin.command:
+        argv:
+          - oc
+          - secrets
+          - link
+          - default
+          - "{{ aprf_pub_registry_import_secret_name }}"
+          - --for=pull
+          - -n
+          - "{{ aprf_pub_import_namespace }}"
+      loop: "{{ aprf_pub_destination_namespaces }}"
+      loop_control:
+        loop_var: aprf_pub_import_namespace
+        label: "{{ aprf_pub_import_namespace }}"
+      changed_when: true
+      environment:
+        KUBECONFIG: "{{ aprf_pub_kubeconfig }}"
+
+    - name: Force-import the four Java workload ImageStream tags after push
+      ansible.builtin.command:
+        argv:
+          - oc
+          - import-image
+          - -n
+          - "{{ aprf_pub_java_app.app_name }}"
+          - "{{ aprf_pub_java_app.app_name }}:latest"
+          - --confirm
+      loop: "{{ aprf_pub_java_apps }}"
+      loop_control:
+        loop_var: aprf_pub_java_app
+        label: "{{ aprf_pub_java_app.app_name }}"
+      changed_when: true
+      environment:
+        KUBECONFIG: "{{ aprf_pub_kubeconfig }}"
+
+- name: Wait for the four Java workload deployments to finish any image-triggered rollout
+  # Reader note:
+  # After Argo applies the desired Deployment objects and the ImageStreams see
+  # the pushed tags, the workload rollouts must finish before proof tests have
+  # a stable baseline.
+  ansible.builtin.command:
+    argv:
+      - oc
+      - rollout
+      - status
+      - "deployment/{{ aprf_pub_java_app.app_name }}"
+      - -n
+      - "{{ aprf_pub_java_app.app_name }}"
+      - --timeout=5m
+  loop: "{{ aprf_pub_java_apps }}"
+  loop_control:
+    loop_var: aprf_pub_java_app
+    label: "{{ aprf_pub_java_app.app_name }}"
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ aprf_pub_kubeconfig }}"

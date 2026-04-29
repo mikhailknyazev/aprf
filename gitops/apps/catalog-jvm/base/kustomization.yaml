@@ -1,0 +1,15 @@
+# Local copy of the simpler direct JVM catalog workload used across
+# D3 Failure domains through D7 Chaos and in the simpler JVM D8 Governance and
+# observability path.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: catalog-jvm
+resources:
+  - imagestream.yaml
+  - networkpolicy.yaml
+  - deployment.yaml
+  - poddisruptionbudget.yaml
+  - service.yaml
+  - route.yaml
+  - servicemonitor.yaml
+  - prometheusrule.yaml

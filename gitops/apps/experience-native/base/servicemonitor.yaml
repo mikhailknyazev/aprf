@@ -1,0 +1,22 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "64600"
+  labels:
+    app.kubernetes.io/name: experience-native
+    openshift.io/user-monitoring: "true"
+  name: experience-native
+spec:
+  endpoints:
+    - interval: 30s
+      path: /q/metrics
+      port: http
+      scheme: http
+      scrapeTimeout: 10s
+  namespaceSelector:
+    matchNames:
+      - experience-native
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: experience-native

@@ -1,0 +1,38 @@
+# Alert rules that prove the control workload is being scraped and still
+# exporting its tiny custom metrics. These support the D8 Governance and
+# observability story more than the richer application drills.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "60700"
+  name: basic-app
+  labels:
+    app.kubernetes.io/name: basic-app
+    openshift.io/user-monitoring: "true"
+    openshift.io/prometheus-rule-evaluation-scope: leaf-prometheus
+spec:
+  groups:
+    - name: basic-app.rules
+      rules:
+        # Scrape reachability is the first user-workload monitoring proof.
+        - alert: BasicAppScrapeTargetDown
+          expr: max by (namespace) (up{namespace="basic-app"}) < 1
+          for: 5m
+          labels:
+            severity: warning
+            app: basic-app
+          annotations:
+            summary: basic-app metrics target is down
+            description: User-workload Prometheus has not scraped basic-app in namespace basic-app for 5 minutes.
+        # The custom uptime metric makes the "tiny app is still observable"
+        # claim easier to read than generic process metrics alone.
+        - alert: BasicAppMetricsMissing
+          expr: absent(basic_app_uptime_seconds{namespace="basic-app"})
+          for: 10m
+          labels:
+            severity: warning
+            app: basic-app
+          annotations:
+            summary: basic-app metrics are missing
+            description: The expected basic-app uptime metric has been missing from user-workload Prometheus for 10 minutes.

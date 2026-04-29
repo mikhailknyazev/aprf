@@ -1,0 +1,22 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "63600"
+  labels:
+    app.kubernetes.io/name: catalog-native
+    openshift.io/user-monitoring: "true"
+  name: catalog-native
+spec:
+  endpoints:
+    - interval: 30s
+      path: /q/metrics
+      port: http
+      scheme: http
+      scrapeTimeout: 10s
+  namespaceSelector:
+    matchNames:
+      - catalog-native
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: catalog-native

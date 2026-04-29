@@ -1,0 +1,11 @@
+# Mutable configuration entry point for the native cache-corrective path.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "63100"
+  name: catalog-native-config
+data:
+  # Baseline stays uncached until the bounded D8 Governance and observability
+  # corrective action enables it.
+  APRF_CATALOG_CACHE_ENABLED: "false"

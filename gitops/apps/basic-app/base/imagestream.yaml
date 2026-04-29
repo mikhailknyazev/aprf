@@ -1,0 +1,18 @@
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "60000"
+  name: basic-app
+spec:
+  lookupPolicy:
+    local: true
+  tags:
+    - name: latest
+      from:
+        kind: DockerImage
+        name: docker.io/library/python:3.12-slim
+      importPolicy:
+        scheduled: true
+      referencePolicy:
+        type: Local

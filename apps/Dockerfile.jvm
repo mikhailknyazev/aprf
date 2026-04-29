@@ -1,0 +1,43 @@
+ARG APP_DIR
+
+# Shared JVM image contract for the Quarkus JVM pair.
+# Use APP_DIR to select either catalog-jvm or experience-jvm from the same
+# published source tree.
+FROM registry.access.redhat.com/ubi9/openjdk-21:1.24 AS build
+ARG APP_DIR
+
+USER root
+RUN microdnf install -y tar gzip findutils \
+  && microdnf clean all
+WORKDIR /source/apps
+COPY --chown=185:0 . /source/apps
+RUN mkdir -p /project \
+  && cp /source/apps/mvnw /project/mvnw \
+  && cp -r /source/apps/.mvn /project/.mvn \
+  && cp /source/apps/${APP_DIR}/pom.xml /project/pom.xml \
+  && cp -r /source/apps/${APP_DIR}/src /project/src \
+  && chmod 755 /project/mvnw \
+  && chown -R 185:0 /project
+
+USER 185
+WORKDIR /project
+RUN ./mvnw -B -ntp -DskipTests package
+
+# Keep the runtime stage small and UBI-based so the published image contract is
+# readable and close to what the article describes.
+FROM registry.access.redhat.com/ubi9/openjdk-21-runtime:1.24
+
+WORKDIR /deployments
+COPY --from=build /project/target/quarkus-app/lib/ ./lib/
+COPY --from=build /project/target/quarkus-app/*.jar ./
+COPY --from=build /project/target/quarkus-app/app/ ./app/
+COPY --from=build /project/target/quarkus-app/quarkus/ ./quarkus/
+
+USER root
+RUN chown -R 185:0 /deployments && chmod -R g+rwX /deployments
+
+EXPOSE 8080
+USER 185
+ENV QUARKUS_HTTP_HOST=0.0.0.0
+
+ENTRYPOINT ["java", "-jar", "/deployments/quarkus-run.jar"]

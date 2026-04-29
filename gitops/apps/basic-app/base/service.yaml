@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "60400"
+  name: basic-app
+  labels:
+    app.kubernetes.io/name: basic-app
+spec:
+  selector:
+    app.kubernetes.io/name: basic-app
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
